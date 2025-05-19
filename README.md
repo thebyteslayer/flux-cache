@@ -6,7 +6,7 @@
   <img src="https://skillicons.dev/icons?i=rust" />
 </p>
 
-<h1 align="center">Triangular Bot</h1>
+<h1 align="center">Pluto</h1>
 <p align="center">
   <b>A Comprehensive In-Memory Caching Software</b>
 </p>
