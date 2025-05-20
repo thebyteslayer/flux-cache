@@ -2,7 +2,7 @@
 name = "pluto-server"
 version = "1.0.0"
 edition = "2024"
-description = "A Comprehensive In-Memory Caching Software"
+description = "A Comprehensive and Extensible Caching Software written in Rust"
 default-run = "pluto-server"
 
 [dependencies]

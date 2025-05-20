@@ -21,18 +21,23 @@ use tokio::time;
 use env_logger::Builder;
 use clap::Parser;
 use socket2;
+use serde_json;
 
 // Command line arguments
 #[derive(Parser, Debug)]
 #[command(name = "pluto-server")]
 #[command(author = "Pluto Team")]
 #[command(version = "1.0.0")]
-#[command(about = "In-memory cache server with compression", long_about = None)]
+#[command(about = "A Comprehensive and Extensible Caching Software written in Rust", long_about = None)]
 #[command(disable_version_flag = true)]
 struct Args {
     /// Server bind address
     #[arg(short, long, default_value = "0.0.0.0:8080")]
     address: String,
+
+    /// Server port (overrides port in --address)
+    #[arg(long)]
+    port: Option<u16>,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(short, long, default_value = "info")]
@@ -50,6 +55,8 @@ enum Command {
     GET { key: String },
     DEL { keys: Vec<String> },
     EXISTS { key: String },
+    CLUSTER_JOIN { address: String },
+    CLUSTER_SLOTS,
 }
 
 // Define response types for our protocol
@@ -59,6 +66,7 @@ enum Response {
     Error(String),
     Data(Vec<u8>),
     Exists(bool),
+    Slots(String),
 }
 
 // Custom error type
@@ -82,15 +90,83 @@ struct CacheEntry {
     compressed_data: Bytes,
 }
 
+// Cluster state and slot management
+const TOTAL_SLOTS: usize = 16384;
+const SLOTS_FILE: &str = "slots.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NodeSlots {
+    address: String,
+    slot_range: (usize, usize),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClusterState {
+    nodes: Vec<String>, // list of node addresses
+    slot_map: Vec<NodeSlots>, // slot assignments
+}
+
+impl ClusterState {
+    fn new(self_addr: String) -> Self {
+        let mut state = ClusterState {
+            nodes: vec![self_addr],
+            slot_map: vec![],
+        };
+        state.rebalance_slots();
+        state
+    }
+
+    fn rebalance_slots(&mut self) {
+        self.slot_map.clear();
+        let n = self.nodes.len();
+        if n == 0 { return; }
+        let base = TOTAL_SLOTS / n;
+        let extra = TOTAL_SLOTS % n;
+        let mut slots = 0;
+        // The first 'extra' nodes get (base+1) slots, the rest get 'base' slots
+        for (i, addr) in self.nodes.iter().enumerate() {
+            let count = if i < extra { base + 1 } else { base };
+            let start = slots;
+            let end = slots + count - 1;
+            self.slot_map.push(NodeSlots {
+                address: addr.clone(),
+                slot_range: (start, end),
+            });
+            slots += count;
+        }
+        // Ensure all slots are covered
+        assert_eq!(slots, TOTAL_SLOTS);
+    }
+
+    fn write_slots_file(&self) {
+        let _ = fs::write(SLOTS_FILE, serde_json::to_string_pretty(&self.slot_map).unwrap());
+    }
+
+    fn add_node(&mut self, addr: String) {
+        if !self.nodes.contains(&addr) {
+            self.nodes.push(addr);
+            self.nodes.sort(); // keep order stable for slot assignment
+            self.rebalance_slots();
+            self.write_slots_file();
+        }
+    }
+
+    fn get_slots_json(&self) -> String {
+        serde_json::to_string_pretty(&self.slot_map).unwrap_or_else(|_| "[]".to_string())
+    }
+}
+
 // Server state
 struct ServerState {
     cache: HashMap<String, CacheEntry>,
+    cluster: ClusterState,
 }
 
 impl ServerState {
-    fn new() -> Self {
+    fn new(self_addr: String) -> Self {
         ServerState {
             cache: HashMap::new(),
+            cluster: ClusterState::new(self_addr),
         }
     }
 
@@ -151,6 +227,15 @@ async fn process_command(
             let state = state.read().unwrap();
             Ok(Response::Exists(state.cache.contains_key(&key)))
         },
+        Command::CLUSTER_JOIN { address } => {
+            let mut state = state.write().unwrap();
+            state.cluster.add_node(address);
+            Ok(Response::Success)
+        },
+        Command::CLUSTER_SLOTS => {
+            let state = state.read().unwrap();
+            Ok(Response::Slots(state.cluster.get_slots_json()))
+        },
     }
 }
 
@@ -163,61 +248,61 @@ async fn handle_client(
     let mut buf = BytesMut::with_capacity(1024 * 1024); // 1MB initial capacity
     loop {
         match reader.read_buf(&mut buf).await {
-            Ok(0) => {
-                // Connection was closed
-                debug!("Client disconnected");
-                break;
-            }
-            Ok(n) => {
-                debug!("Read {n} bytes from client");
-                // Parse the command
-                match serde_json::from_slice::<Command>(&buf[..n]) {
-                    Ok(cmd) => {
-                        debug!("Received command: {:?}", cmd);
-                        // Process the command
-                        let response = match process_command(cmd, &state).await {
-                            Ok(resp) => resp,
-                            Err(e) => Response::Error(e.to_string()),
-                        };
-                        // Serialize and send the response
-                        match serde_json::to_vec(&response) {
-                            Ok(data) => {
-                                if let Err(e) = writer.write_all(&data).await {
-                                    error!("Failed to write response: {}", e);
-                                    break;
+                    Ok(0) => {
+                        // Connection was closed
+                        debug!("Client disconnected");
+                        break;
+                    }
+                    Ok(n) => {
+                        debug!("Read {n} bytes from client");
+                        // Parse the command
+                        match serde_json::from_slice::<Command>(&buf[..n]) {
+                            Ok(cmd) => {
+                                debug!("Received command: {:?}", cmd);
+                                // Process the command
+                                let response = match process_command(cmd, &state).await {
+                                    Ok(resp) => resp,
+                                    Err(e) => Response::Error(e.to_string()),
+                                };
+                                // Serialize and send the response
+                                match serde_json::to_vec(&response) {
+                                    Ok(data) => {
+                                        if let Err(e) = writer.write_all(&data).await {
+                                            error!("Failed to write response: {}", e);
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to serialize response: {}", e);
+                                        break;
+                                    }
                                 }
                             }
                             Err(e) => {
-                                error!("Failed to serialize response: {}", e);
-                                break;
+                                error!("Failed to parse command: {}", e);
+                                // Send error response
+                                let response = Response::Error(format!("Invalid command: {}", e));
+                                match serde_json::to_vec(&response) {
+                                    Ok(data) => {
+                                        if let Err(e) = writer.write_all(&data).await {
+                                            error!("Failed to write error response: {}", e);
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to serialize error response: {}", e);
+                                        break;
+                                    }
+                                }
                             }
                         }
+                        // Clear the buffer for the next command
+                        buf.clear();
                     }
                     Err(e) => {
-                        error!("Failed to parse command: {}", e);
-                        // Send error response
-                        let response = Response::Error(format!("Invalid command: {}", e));
-                        match serde_json::to_vec(&response) {
-                            Ok(data) => {
-                                if let Err(e) = writer.write_all(&data).await {
-                                    error!("Failed to write error response: {}", e);
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to serialize error response: {}", e);
-                                break;
-                            }
-                        }
+                        error!("Failed to read from socket: {}", e);
+                        break;
                     }
-                }
-                // Clear the buffer for the next command
-                buf.clear();
-            }
-            Err(e) => {
-                error!("Failed to read from socket: {}", e);
-                break;
-            }
         }
     }
 }
@@ -272,14 +357,32 @@ async fn main() -> std::io::Result<()> {
     // Initialize custom logger
     setup_logger(&args.log_level);
     
+    // Determine bind address, considering --port
+    let mut bind_addr_str = args.address.clone();
+    if let Some(port) = args.port {
+        // Try to parse the address as SocketAddr, or as IP/host only
+        let mut parts = bind_addr_str.rsplitn(2, ':');
+        let last = parts.next();
+        let rest = parts.next();
+        let is_addr_with_port = last.and_then(|l| l.parse::<u16>().ok()).is_some() && rest.is_some();
+        if is_addr_with_port {
+            // Replace the port
+            let host = rest.unwrap();
+            bind_addr_str = format!("{}:{}", host, port);
+        } else {
+            // No port in address, just append
+            bind_addr_str = format!("{}:{}", bind_addr_str, port);
+        }
+    }
+    
     // Create server state
-    let state = Arc::new(RwLock::new(ServerState::new()));
+    let state = Arc::new(RwLock::new(ServerState::new(bind_addr_str.clone())));
     
     // Parse bind address
-    let bind_addr = match args.address.parse::<SocketAddr>() {
+    let bind_addr = match bind_addr_str.parse::<SocketAddr>() {
         Ok(addr) => addr,
         Err(e) => {
-            error!("Invalid address format - {}: {}", args.address, e);
+            error!("Invalid address format - {}: {}", bind_addr_str, e);
             return Ok(());
         }
     };
@@ -316,44 +419,44 @@ async fn main() -> std::io::Result<()> {
     // Accept connections
     loop {
         match tokio::time::timeout(Duration::from_secs(5), listener.accept()).await {
-            Ok(Ok((socket, addr))) => {
-                active_connections += 1;
+                    Ok(Ok((socket, addr))) => {
+                        active_connections += 1;
                 debug!("Accepted connection from: {} (active: {})", addr, active_connections);
-                // Set socket buffer sizes
-                if let Ok(stream) = socket.into_std() {
-                    match socket2::Socket::try_from(stream) {
-                        Ok(sock) => {
-                            // Set large buffer sizes for this connection
-                            let _ = sock.set_recv_buffer_size(16 * 1024 * 1024);
-                            let _ = sock.set_send_buffer_size(16 * 1024 * 1024);
-                            // Convert back to tokio socket
-                            if let Ok(socket) = TcpStream::from_std(sock.into()) {
+                        // Set socket buffer sizes
+                        if let Ok(stream) = socket.into_std() {
+                            match socket2::Socket::try_from(stream) {
+                                Ok(sock) => {
+                                    // Set large buffer sizes for this connection
+                                    let _ = sock.set_recv_buffer_size(16 * 1024 * 1024);
+                                    let _ = sock.set_send_buffer_size(16 * 1024 * 1024);
+                                    // Convert back to tokio socket
+                                    if let Ok(socket) = TcpStream::from_std(sock.into()) {
                                 // Clone state for the new task
-                                let state = state.clone();
-                                // Spawn a new task to handle the connection
-                                tokio::spawn(async move {
+                                        let state = state.clone();
+                                        // Spawn a new task to handle the connection
+                                        tokio::spawn(async move {
                                     handle_client(socket, state).await;
-                                    debug!("Client handler task completed for {}", addr);
-                                });
-                            } else {
-                                error!("Failed to convert socket back to TcpStream");
+                                            debug!("Client handler task completed for {}", addr);
+                                        });
+                                    } else {
+                                        error!("Failed to convert socket back to TcpStream");
+                                    }
+                                },
+                                Err(e) => {
+                                    error!("Failed to convert to socket2::Socket: {}", e);
+                                }
                             }
-                        },
-                        Err(e) => {
-                            error!("Failed to convert to socket2::Socket: {}", e);
+                        } else {
+                            error!("Failed to get standard socket from TcpStream");
                         }
                     }
-                } else {
-                    error!("Failed to get standard socket from TcpStream");
+                    Ok(Err(e)) => {
+                        error!("Failed to accept connection: {}", e);
+                    }
+                    Err(_) => {
+                        // Timeout occurred, just continue
+                        debug!("Accept timed out, checking system state");
+                    }
                 }
             }
-            Ok(Err(e)) => {
-                error!("Failed to accept connection: {}", e);
-            }
-            Err(_) => {
-                // Timeout occurred, just continue
-                debug!("Accept timed out, checking system state");
-            }
-        }
-    }
 }
