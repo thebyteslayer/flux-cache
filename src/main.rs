@@ -8,6 +8,7 @@ use std::process;
 use std::net::SocketAddr;
 use std::fs;
 use std::path::Path;
+use std::io::{BufReader, Write, BufRead};
 
 use bytes::{Bytes, BytesMut};
 use log::{debug, error, info, LevelFilter};
@@ -343,6 +344,28 @@ fn setup_logger(log_level: &str) {
     builder.init();
 }
 
+fn read_pluto_conf() -> String {
+    let conf_path = "pluto.conf";
+    if !Path::new(conf_path).exists() {
+        if let Ok(mut f) = fs::File::create(conf_path) {
+            let _ = f.write_all(b"bind 0.0.0.0\n");
+        }
+        return "0.0.0.0".to_string();
+    }
+    if let Ok(f) = fs::File::open(conf_path) {
+        let reader = BufReader::new(f);
+        for line in reader.lines() {
+            if let Ok(l) = line {
+                let l = l.trim();
+                if l.starts_with("bind ") {
+                    return l[5..].trim().to_string();
+                }
+            }
+        }
+    }
+    "0.0.0.0".to_string()
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     // Parse command-line arguments
@@ -357,32 +380,19 @@ async fn main() -> std::io::Result<()> {
     // Initialize custom logger
     setup_logger(&args.log_level);
     
-    // Determine bind address, considering --port
-    let mut bind_addr_str = args.address.clone();
-    if let Some(port) = args.port {
-        // Try to parse the address as SocketAddr, or as IP/host only
-        let mut parts = bind_addr_str.rsplitn(2, ':');
-        let last = parts.next();
-        let rest = parts.next();
-        let is_addr_with_port = last.and_then(|l| l.parse::<u16>().ok()).is_some() && rest.is_some();
-        if is_addr_with_port {
-            // Replace the port
-            let host = rest.unwrap();
-            bind_addr_str = format!("{}:{}", host, port);
-        } else {
-            // No port in address, just append
-            bind_addr_str = format!("{}:{}", bind_addr_str, port);
-        }
-    }
+    // Read bind IP from pluto.conf (create if missing)
+    let conf_ip = read_pluto_conf();
+    let port = args.port.unwrap_or(8080);
+    let node_addr = format!("{}:{}", conf_ip, port);
     
-    // Create server state
-    let state = Arc::new(RwLock::new(ServerState::new(bind_addr_str.clone())));
+    // Create server state with public address
+    let state = Arc::new(RwLock::new(ServerState::new(node_addr.clone())));
     
     // Parse bind address
-    let bind_addr = match bind_addr_str.parse::<SocketAddr>() {
+    let bind_addr = match node_addr.parse::<SocketAddr>() {
         Ok(addr) => addr,
         Err(e) => {
-            error!("Invalid address format - {}: {}", bind_addr_str, e);
+            eprintln!("Invalid address format - {}: {}", node_addr, e);
             return Ok(());
         }
     };
