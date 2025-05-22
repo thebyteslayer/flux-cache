@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="assets/flux-light-transparent.png" alt="Flux Logo" width="200" height="200" />
+</p>
+
+<p align="center">
   <img src="https://skillicons.dev/icons?i=rust" />
 </p>
 
