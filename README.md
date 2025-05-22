@@ -1,9 +1,5 @@
 <p align="center">
-  <img src="assets/flux-light-transparent.png" alt="Flux Logo" width="200" height="200" />
-</p>
-
-<p align="center">
-  <img src="https://skillicons.dev/icons?i=rust" />
+  <img src="assets/flux-light-transparent.png" alt="Flux Logo" width="150" height="150" />
 </p>
 
 <h1 align="center">Flux Cache</h1>
