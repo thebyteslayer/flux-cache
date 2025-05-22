@@ -20,36 +20,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::time;
 use env_logger::Builder;
-use clap::Parser;
 use socket2;
 use serde_json;
+use toml;
 
 // Command line arguments
-#[derive(Parser, Debug)]
-#[command(name = "flux-cache")]
-#[command(author = "thebyteslayer")]
-#[command(version = "1.0.0")]
-#[command(about = "A scalable and extensible caching software written in Rust", long_about = None)]
-#[command(disable_version_flag = true)]
-struct Args {
-    /// Server bind address
-    #[arg(short, long, default_value = "0.0.0.0:8080")]
-    address: String,
-
-    /// Server port (overrides port in --address)
-    #[arg(long)]
-    port: Option<u16>,
-
-    /// Log level (trace, debug, info, warn, error)
-    #[arg(short, long, default_value = "info")]
-    log_level: String,
-
-    /// Just print version and exit
-    #[arg(short, long)]
-    version: bool,
-}
-
-// Define command types for our protocol
 #[derive(Debug, Serialize, Deserialize)]
 enum Command {
     SET { key: String, value: Vec<u8> },
@@ -308,82 +283,45 @@ async fn handle_client(
     }
 }
 
-// Initialize the logger with custom settings
-fn setup_logger(log_level: &str) {
-    let level = match log_level.to_lowercase().as_str() {
-        "trace" => LevelFilter::Trace,
-        "debug" => LevelFilter::Debug,
-        "info" => LevelFilter::Info,
-        "warn" => LevelFilter::Warn,
-        "error" => LevelFilter::Error,
-        _ => LevelFilter::Info,
-    };
-    
-    let mut builder = Builder::new();
-    
-    // Set the base log level
-    builder.filter_level(level);
-    
-    // Format each log line to include the file and line number
-    builder.format(|buf, record| {
-        use std::io::Write;
-        let level_style = buf.default_level_style(record.level());
-        
-        writeln!(
-            buf,
-            "[{} {} {}:{}] {}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-            level_style.value(record.level()),
-            record.file().unwrap_or("unknown"),
-            record.line().unwrap_or(0),
-            record.args()
-        )
-    });
-    
-    // Apply the configuration
-    builder.init();
+#[derive(Debug, Deserialize, Serialize, Default)]
+struct FluxConfig {
+    #[serde(default = "default_bind")]
+    bind: String,
+    #[serde(default = "default_port")]
+    port: u16,
 }
 
-fn read_flux_conf() -> String {
-    let conf_path = "flux.conf";
+fn default_bind() -> String { "127.0.0.1".to_string() }
+fn default_port() -> u16 { 6214 }
+
+fn read_flux_toml() -> FluxConfig {
+    let conf_path = "flux.toml";
     if !Path::new(conf_path).exists() {
-        if let Ok(mut f) = fs::File::create(conf_path) {
-            let _ = f.write_all(b"bind 0.0.0.0\n");
-        }
-        return "0.0.0.0".to_string();
+        // Create default config if missing
+        let default = FluxConfig {
+            bind: default_bind(),
+            port: default_port(),
+        };
+        // Write TOML with bind as a quoted string (valid for IP addresses)
+        let toml_str = format!("bind = \"127.0.0.1\"\nport = 6214\n");
+        let _ = fs::write(conf_path, toml_str);
+        return default;
     }
-    if let Ok(f) = fs::File::open(conf_path) {
-        let reader = BufReader::new(f);
-        for line in reader.lines() {
-            if let Ok(l) = line {
-                let l = l.trim();
-                if l.starts_with("bind ") {
-                    return l[5..].trim().to_string();
-                }
-            }
+    let content = fs::read_to_string(conf_path).unwrap_or_default();
+    match toml::from_str(&content) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("[WARN] Could not parse flux.toml: {e}. Using defaults.");
+            FluxConfig::default()
         }
     }
-    "0.0.0.0".to_string()
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    // Parse command-line arguments
-    let args = Args::parse();
-    
-    // If version flag is set, just print version and exit
-    if args.version {
-        println!("Flux Cache v1.0.0");
-        return Ok(());
-    }
-    
-    // Initialize custom logger
-    setup_logger(&args.log_level);
-    
-    // Read bind IP from flux.conf (create if missing)
-    let conf_ip = read_flux_conf();
-    let port = args.port.unwrap_or(8080);
-    let node_addr = format!("{}:{}", conf_ip, port);
+    // Read bind IP and port from flux.toml (create if missing)
+    let conf = read_flux_toml();
+    let node_addr = format!("{}:{}", conf.bind, conf.port);
     
     // Create server state with public address
     let state = Arc::new(RwLock::new(ServerState::new(node_addr.clone())));
@@ -420,8 +358,8 @@ async fn main() -> std::io::Result<()> {
     
     let listener = TcpListener::from_std(socket_config.into())?;
     
-    // Clean startup message - only showing server is running and address
-    info!("Flux running on {}", bind_addr);
+    // Print startup message
+    println!("Flux is running on {}", node_addr);
     
     // Count of active connections
     let mut active_connections = 0;
