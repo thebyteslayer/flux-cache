@@ -1,9 +1,9 @@
 [package]
-name = "pluto-server"
+name = "flux-cache"
 version = "1.0.0"
 edition = "2024"
-description = "A Comprehensive and Extensible Caching Software written in Rust"
-default-run = "pluto-server"
+description = "A scalable and extensible caching software written in Rust"
+default-run = "flux-cache"
 
 [dependencies]
 tokio = { version = "1.45.0", features = ["full"] }

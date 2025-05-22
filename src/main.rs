@@ -26,10 +26,10 @@ use serde_json;
 
 // Command line arguments
 #[derive(Parser, Debug)]
-#[command(name = "pluto-server")]
-#[command(author = "Pluto Team")]
+#[command(name = "flux-cache")]
+#[command(author = "thebyteslayer")]
 #[command(version = "1.0.0")]
-#[command(about = "A Comprehensive and Extensible Caching Software written in Rust", long_about = None)]
+#[command(about = "A scalable and extensible caching software written in Rust", long_about = None)]
 #[command(disable_version_flag = true)]
 struct Args {
     /// Server bind address
@@ -344,8 +344,8 @@ fn setup_logger(log_level: &str) {
     builder.init();
 }
 
-fn read_pluto_conf() -> String {
-    let conf_path = "pluto.conf";
+fn read_flux_conf() -> String {
+    let conf_path = "flux.conf";
     if !Path::new(conf_path).exists() {
         if let Ok(mut f) = fs::File::create(conf_path) {
             let _ = f.write_all(b"bind 0.0.0.0\n");
@@ -373,15 +373,15 @@ async fn main() -> std::io::Result<()> {
     
     // If version flag is set, just print version and exit
     if args.version {
-        println!("Pluto Server v1.0.0");
+        println!("Flux Cache v1.0.0");
         return Ok(());
     }
     
     // Initialize custom logger
     setup_logger(&args.log_level);
     
-    // Read bind IP from pluto.conf (create if missing)
-    let conf_ip = read_pluto_conf();
+    // Read bind IP from flux.conf (create if missing)
+    let conf_ip = read_flux_conf();
     let port = args.port.unwrap_or(8080);
     let node_addr = format!("{}:{}", conf_ip, port);
     
@@ -421,7 +421,7 @@ async fn main() -> std::io::Result<()> {
     let listener = TcpListener::from_std(socket_config.into())?;
     
     // Clean startup message - only showing server is running and address
-    info!("Pluto running on {}", bind_addr);
+    info!("Flux running on {}", bind_addr);
     
     // Count of active connections
     let mut active_connections = 0;
