@@ -1,4 +1,4 @@
 Cargo.lock
-slots.json
-flux.toml
+cluster.json
+flxc.toml
 /target
